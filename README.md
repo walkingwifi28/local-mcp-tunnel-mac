@@ -176,6 +176,10 @@ ruby -e 'require "yaml"; YAML.load_file(".github/workflows/macos-release.yml"); 
 actionlint .github/workflows/macos-release.yml
 ```
 
+## ライセンス
+
+[MIT License](LICENSE)
+
 ## Developer ID署名・Apple公証
 
 `Scripts/build-release.sh`は次の環境変数に対応しています。
