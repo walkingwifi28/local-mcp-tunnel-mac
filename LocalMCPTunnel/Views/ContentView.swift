@@ -50,15 +50,20 @@ struct ContentView: View {
                 LabeledContent("Tunnel ID :", value: settings.tunnelID.isEmpty ? "None" : settings.tunnelID)
                 HStack {
                     Button("Init") {
+                        selectedLogSource = .tunnel
                         settings.save()
                         controller.initializeTunnel(using: settings.configuration)
                     }
                     .disabled(controller.tunnelState.isBusy || controller.tunnelState.isRunning)
 
                     if controller.canStopTunnel {
-                        Button("Stop", role: .destructive) { controller.stopTunnel() }
+                        Button("Stop", role: .destructive) {
+                            selectedLogSource = .tunnel
+                            controller.stopTunnel()
+                        }
                     } else {
                         Button("Run") {
+                            selectedLogSource = .tunnel
                             settings.save()
                             controller.startTunnel(using: settings.configuration)
                         }
@@ -82,9 +87,13 @@ struct ContentView: View {
                     .truncationMode(.middle)
                 HStack {
                     if controller.localMCPState.isRunning {
-                        Button("Stop", role: .destructive) { controller.stopLocalMCP() }
+                        Button("Stop", role: .destructive) {
+                            selectedLogSource = .localMCP
+                            controller.stopLocalMCP()
+                        }
                     } else {
                         Button("Start") {
+                            selectedLogSource = .localMCP
                             settings.save()
                             controller.startLocalMCP(using: settings.configuration)
                         }
