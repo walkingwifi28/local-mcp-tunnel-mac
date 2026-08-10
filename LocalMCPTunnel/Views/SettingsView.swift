@@ -107,6 +107,11 @@ struct SettingsView: View {
             saveFooter
         }
         .frame(width: 660, height: 680)
+        .onAppear {
+            saveResetTask?.cancel()
+            saveResetTask = nil
+            saveButtonState = .idle
+        }
         .task {
             updateService.checkForUpdatesIfNeeded()
         }
