@@ -55,7 +55,7 @@ struct ContentView: View {
                     }
                     .disabled(controller.tunnelState.isBusy || controller.tunnelState.isRunning)
 
-                    if controller.tunnelState.isRunning {
+                    if controller.canStopTunnel {
                         Button("Stop", role: .destructive) { controller.stopTunnel() }
                     } else {
                         Button("Run") {

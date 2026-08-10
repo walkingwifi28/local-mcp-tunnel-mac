@@ -15,6 +15,31 @@ final class CLIController: ObservableObject {
         static let permissionMode = "permissionMode"
     }
 
+    private enum TunnelRestartPolicy {
+        static let maxAttempts = 5
+        static let initialDelay: TimeInterval = 1
+        static let maxDelay: TimeInterval = 30
+        static let resetAfter: TimeInterval = 60
+
+        static func delay(forAttempt attempt: Int) -> TimeInterval {
+            guard attempt > 0 else { return 0 }
+            var delay = initialDelay
+            if attempt > 1 {
+                for _ in 1..<attempt {
+                    delay = min(delay * 2, maxDelay)
+                }
+            }
+            return delay
+        }
+    }
+
+    private struct TunnelLaunchSpec {
+        let executable: URL
+        let arguments: [String]
+        let environment: [String: String]
+        let workingDirectory: String
+    }
+
     enum LogSource: String, CaseIterable, Identifiable {
         case tunnel
         case localMCP
@@ -34,6 +59,10 @@ final class CLIController: ObservableObject {
     private var initializationProcess: ManagedProcess?
     private var tunnelProcess: ManagedProcess?
     private var localMCPProcess: ManagedProcess?
+    private var tunnelRestartWorkItem: DispatchWorkItem?
+    private var tunnelRestartAttempts = 0
+    private var tunnelStartedAt: Date?
+    private var tunnelLaunchSpec: TunnelLaunchSpec?
     private var tunnelStopRequested = false
     private var localMCPStopRequested = false
     private var redactedValues: [String] = []
@@ -44,8 +73,12 @@ final class CLIController: ObservableObject {
         permissionMode = PermissionMode(rawValue: defaults.string(forKey: DefaultsKeys.permissionMode) ?? "") ?? .ask
     }
 
+    var canStopTunnel: Bool {
+        tunnelProcess?.isRunning == true || tunnelRestartWorkItem != nil
+    }
+
     func initializeTunnel(using configuration: CLIConfiguration) {
-        guard validate(configuration), initializationProcess == nil, tunnelProcess == nil else { return }
+        guard validate(configuration), initializationProcess == nil, tunnelProcess == nil, tunnelRestartWorkItem == nil else { return }
 
         do {
             rememberSecret(configuration.controlPlaneAPIKey)
@@ -84,47 +117,160 @@ final class CLIController: ObservableObject {
     }
 
     func startTunnel(using configuration: CLIConfiguration) {
-        guard validate(configuration), initializationProcess == nil, tunnelProcess == nil else { return }
+        guard validate(configuration), initializationProcess == nil, tunnelProcess == nil, tunnelRestartWorkItem == nil else { return }
         do {
             rememberSecret(configuration.controlPlaneAPIKey)
             let environment = ShellPathResolver.augmentedEnvironment(apiKey: configuration.controlPlaneAPIKey)
             let executable = try ShellPathResolver.resolveExecutable(configuration.tunnelClientExecutable, environment: environment)
             let arguments = ["run", "--profile", configuration.profileName]
-            appendLog("[tunnel] \(displayCommand(executable: executable.path, arguments: arguments))", to: .tunnel)
-            tunnelState = .starting
-            tunnelStopRequested = false
-
-            let process = try ManagedProcess(
+            let spec = TunnelLaunchSpec(
                 executable: executable,
                 arguments: arguments,
                 environment: environment,
-                workingDirectory: configuration.workingDirectory,
-                label: "tunnel",
-                onOutput: { [weak self] line in self?.appendLog(line, to: .tunnel) },
-                onTermination: { [weak self] status in
-                    guard let self else { return }
-                    self.tunnelProcess = nil
-                    let wasRequested = self.tunnelStopRequested
-                    self.tunnelStopRequested = false
-                    self.tunnelState = (wasRequested || status == 0) ? .stopped : .failed("Exit code: \(status)")
-                }
+                workingDirectory: configuration.workingDirectory
             )
-            tunnelProcess = process
-            try process.start()
-            tunnelState = .running(processIdentifier: process.processIdentifier)
+
+            appendLog("[tunnel] \(displayCommand(executable: executable.path, arguments: arguments))", to: .tunnel)
+            tunnelState = .starting
+            tunnelStopRequested = false
+            tunnelRestartWorkItem?.cancel()
+            tunnelRestartWorkItem = nil
+            tunnelRestartAttempts = 0
+            tunnelStartedAt = nil
+            tunnelLaunchSpec = spec
+
+            try launchTunnel(using: spec)
         } catch {
             tunnelProcess = nil
+            tunnelLaunchSpec = nil
             tunnelState = .failed(error.localizedDescription)
             present(error, source: .tunnel)
         }
     }
 
     func stopTunnel() {
-        guard let tunnelProcess else { return }
+        guard tunnelProcess != nil || tunnelRestartWorkItem != nil else { return }
         tunnelStopRequested = true
-        tunnelState = .stopping
-        appendLog("[tunnel] Stop request sent.", to: .tunnel)
-        tunnelProcess.stop()
+        tunnelRestartWorkItem?.cancel()
+        tunnelRestartWorkItem = nil
+
+        if let tunnelProcess {
+            tunnelState = .stopping
+            appendLog("[tunnel] Stop request sent.", to: .tunnel)
+            tunnelProcess.stop()
+        } else {
+            appendLog("[tunnel] Manual stop request cancelled automatic restart.", to: .tunnel)
+            tunnelLaunchSpec = nil
+            tunnelStartedAt = nil
+            tunnelRestartAttempts = 0
+            tunnelState = .stopped
+        }
+    }
+
+    private func launchTunnel(using spec: TunnelLaunchSpec, restartAttempt: Int? = nil) throws {
+        let process = try ManagedProcess(
+            executable: spec.executable,
+            arguments: spec.arguments,
+            environment: spec.environment,
+            workingDirectory: spec.workingDirectory,
+            label: "tunnel",
+            onOutput: { [weak self] line in self?.appendLog(line, to: .tunnel) },
+            onTermination: { [weak self] status in
+                self?.handleTunnelTermination(status: status)
+            }
+        )
+
+        tunnelProcess = process
+        do {
+            try process.start()
+        } catch {
+            tunnelProcess = nil
+            throw error
+        }
+
+        tunnelStartedAt = Date()
+        tunnelState = .running(processIdentifier: process.processIdentifier)
+        if restartAttempt != nil {
+            appendLog("[tunnel] tunnel-client restarted successfully.", to: .tunnel)
+        }
+    }
+
+    private func handleTunnelTermination(status: Int32) {
+        let uptime = tunnelStartedAt.map { Date().timeIntervalSince($0) } ?? 0
+        tunnelProcess = nil
+        tunnelStartedAt = nil
+
+        if tunnelStopRequested {
+            tunnelStopRequested = false
+            tunnelRestartWorkItem?.cancel()
+            tunnelRestartWorkItem = nil
+            tunnelRestartAttempts = 0
+            tunnelLaunchSpec = nil
+            tunnelState = .stopped
+            return
+        }
+
+        guard let spec = tunnelLaunchSpec else {
+            tunnelState = .failed("Exit code: \(status)")
+            return
+        }
+
+        if uptime >= TunnelRestartPolicy.resetAfter {
+            tunnelRestartAttempts = 0
+        }
+        scheduleTunnelRestart(using: spec, lastError: "Exit code: \(status)")
+    }
+
+    private func scheduleTunnelRestart(using spec: TunnelLaunchSpec, lastError: String) {
+        guard !tunnelStopRequested else {
+            tunnelState = .stopped
+            return
+        }
+
+        guard tunnelRestartAttempts < TunnelRestartPolicy.maxAttempts else {
+            let message = "\(lastError); automatic restart limit reached (\(TunnelRestartPolicy.maxAttempts) attempts)"
+            appendLog("[tunnel] \(message)", to: .tunnel)
+            tunnelRestartWorkItem = nil
+            tunnelLaunchSpec = nil
+            tunnelState = .failed(message)
+            return
+        }
+
+        tunnelRestartAttempts += 1
+        let attempt = tunnelRestartAttempts
+        let delay = TunnelRestartPolicy.delay(forAttempt: attempt)
+        tunnelState = .starting
+        appendLog(
+            "[tunnel] Unexpected exit. Restart attempt \(attempt)/\(TunnelRestartPolicy.maxAttempts) in \(Int(delay * 1_000)) ms.",
+            to: .tunnel
+        )
+
+        let workItem = DispatchWorkItem { [weak self] in
+            Task { @MainActor in
+                guard let self else { return }
+                guard !self.tunnelStopRequested else {
+                    self.tunnelRestartWorkItem = nil
+                    self.tunnelState = .stopped
+                    return
+                }
+
+                self.tunnelRestartWorkItem = nil
+                self.appendLog(
+                    "[tunnel] Restarting tunnel-client (attempt \(attempt)/\(TunnelRestartPolicy.maxAttempts)): \(self.displayCommand(executable: spec.executable.path, arguments: spec.arguments))",
+                    to: .tunnel
+                )
+
+                do {
+                    try self.launchTunnel(using: spec, restartAttempt: attempt)
+                } catch {
+                    let message = error.localizedDescription
+                    self.appendLog("[tunnel] Restart attempt \(attempt) failed: \(message)", to: .tunnel)
+                    self.scheduleTunnelRestart(using: spec, lastError: message)
+                }
+            }
+        }
+        tunnelRestartWorkItem = workItem
+        DispatchQueue.main.asyncAfter(deadline: .now() + delay, execute: workItem)
     }
 
     func startLocalMCP(using configuration: CLIConfiguration) {
@@ -237,6 +383,14 @@ final class CLIController: ObservableObject {
     }
 
     func terminateAll() {
+        tunnelStopRequested = true
+        localMCPStopRequested = true
+        tunnelRestartWorkItem?.cancel()
+        tunnelRestartWorkItem = nil
+        tunnelLaunchSpec = nil
+        tunnelStartedAt = nil
+        tunnelRestartAttempts = 0
+
         initializationProcess?.forceStop()
         tunnelProcess?.forceStop()
         localMCPProcess?.forceStop()
