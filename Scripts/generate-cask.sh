@@ -57,6 +57,7 @@ cask "local-mcp-tunnel" do
   end
 
   auto_updates false
+  depends_on formula: "openai/tools/tunnel-client"
   depends_on arch: :arm64
   depends_on macos: ">= :sonoma"
 

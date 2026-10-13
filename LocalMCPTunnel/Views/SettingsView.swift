@@ -8,6 +8,8 @@ struct SettingsView: View {
     @State private var saveResetTask: Task<Void, Never>?
     @State private var updateButtonState: UpdateButtonState = .idle
     @State private var updateButtonResetTask: Task<Void, Never>?
+    @State private var tunnelClientStatus = "Checking tunnel-client..."
+    @State private var tunnelClientCheckID = UUID()
     @StateObject private var updateService = AppUpdateService()
 
     var body: some View {
@@ -25,12 +27,21 @@ struct SettingsView: View {
                     TextField("Tunnel ID", text: $settings.tunnelID)
                     TextField("Sample Name", text: $settings.sampleName)
                     TextField("tunnel-client", text: $settings.tunnelClientExecutable)
+                    Text(tunnelClientStatus)
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .textSelection(.enabled)
+                    Button("Check tunnel-client") { tunnelClientCheckID = UUID() }
+                    Text("Install: brew install openai/tools/tunnel-client\nUpdate: brew update && brew upgrade openai/tools/tunnel-client")
+                        .font(.caption.monospaced())
+                        .textSelection(.enabled)
+                    Link("Official installation guide", destination: URL(string: "https://github.com/openai/tunnel-client#install-with-homebrew")!)
                     SecureField("CONTROL_PLANE_API_KEY", text: $settings.controlPlaneAPIKey)
                 } header: {
                     HStack {
                         Text("Tunnel Client")
                         Spacer()
-                        Link(destination: URL(string: "https://platform.openai.com/")!) {
+                        Link(destination: URL(string: "https://platform.openai.com/settings/organization/tunnels")!) {
                             Image(systemName: "arrow.up.right.square")
                                 .font(.system(size: 14, weight: .semibold))
                         }
@@ -112,6 +123,9 @@ struct SettingsView: View {
             saveResetTask = nil
             saveButtonState = .idle
         }
+        .task(id: "\(settings.tunnelClientExecutable)-\(tunnelClientCheckID)") {
+            await checkTunnelClient()
+        }
         .task {
             updateService.checkForUpdatesIfNeeded()
         }
@@ -121,6 +135,55 @@ struct SettingsView: View {
         .onDisappear {
             saveResetTask?.cancel()
             updateButtonResetTask?.cancel()
+        }
+    }
+
+    @MainActor
+    private func checkTunnelClient() async {
+        tunnelClientStatus = "Checking tunnel-client..."
+        let process = Process()
+        let outputURL = FileManager.default.temporaryDirectory.appendingPathComponent("tunnel-version-\(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(at: outputURL) }
+        do {
+            guard FileManager.default.createFile(atPath: outputURL.path, contents: nil, attributes: [.posixPermissions: 0o600]) else {
+                tunnelClientStatus = "Unable to create the version-check output file."
+                return
+            }
+            let output = try FileHandle(forWritingTo: outputURL)
+            defer { try? output.close() }
+            var environment = ShellPathResolver.augmentedEnvironment()
+            environment.removeValue(forKey: "CONTROL_PLANE_API_KEY")
+            environment.removeValue(forKey: "OPENAI_ADMIN_KEY")
+            let executable = try ShellPathResolver.resolveExecutable(settings.tunnelClientExecutable, environment: environment)
+            process.executableURL = executable
+            process.arguments = ["--version"]
+            process.environment = environment
+            process.standardOutput = output
+            process.standardError = output
+            process.standardInput = FileHandle.nullDevice
+            try process.run()
+            defer {
+                if process.isRunning { process.terminate() }
+            }
+            for _ in 0..<50 {
+                if !process.isRunning { break }
+                try await Task.sleep(for: .milliseconds(100))
+            }
+            guard !process.isRunning else {
+                tunnelClientStatus = "\(executable.path) — Version check timed out."
+                return
+            }
+            let reader = try FileHandle(forReadingFrom: outputURL)
+            defer { try? reader.close() }
+            let data = try reader.read(upToCount: 4096) ?? Data()
+            let version = String(decoding: data, as: UTF8.self).trimmingCharacters(in: .whitespacesAndNewlines)
+            tunnelClientStatus = process.terminationStatus == 0 && !version.isEmpty
+                ? "\(executable.path)\n\(version)"
+                : "\(executable.path) — Version check failed (exit \(process.terminationStatus))."
+        } catch is CancellationError {
+            // The next check owns the displayed status.
+        } catch {
+            tunnelClientStatus = error.localizedDescription
         }
     }
 

@@ -29,7 +29,13 @@ enum ShellPathResolver {
             return URL(fileURLWithPath: expandedValue)
         }
 
-        let pathEntries = augmentedPath(environment["PATH"]).split(separator: ":").map(String.init)
+        // Prefer the official Homebrew installation for automatic tunnel-client lookup.
+        // Explicit paths above continue to select the user's chosen executable.
+        let homebrewPaths = expandedValue == "tunnel-client" ? [
+            "/opt/homebrew/opt/tunnel-client/bin", "/opt/homebrew/bin",
+            "/usr/local/opt/tunnel-client/bin", "/usr/local/bin"
+        ] : []
+        let pathEntries = homebrewPaths + augmentedPath(environment["PATH"]).split(separator: ":").map(String.init)
         for directory in pathEntries {
             let candidate = URL(fileURLWithPath: directory).appendingPathComponent(expandedValue).path
             if FileManager.default.isExecutableFile(atPath: candidate) {
@@ -77,6 +83,9 @@ enum ShellPathResolver {
             case .emptyExecutable:
                 return "The executable file has not been set."
             case let .commandNotFound(command):
+                if command == "tunnel-client" {
+                    return "tunnel-client was not found. Install it with: brew install openai/tools/tunnel-client"
+                }
                 return "Command not found: \(command)"
             case let .notExecutable(path):
                 return "Not an executable file: \(path)"

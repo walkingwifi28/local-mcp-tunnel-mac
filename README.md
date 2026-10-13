@@ -7,7 +7,16 @@
 
 ## インストール
 
-Homebrew Caskからインストールします。
+OpenAI 公式の `tunnel-client` を Homebrew で導入します。公式 Formula が対応する cloudflared と companion manifest も管理するため、個別のダウンロードは不要です。
+
+```bash
+brew install openai/tools/tunnel-client
+tunnel-client --version
+```
+
+[公式インストールガイド](https://github.com/openai/tunnel-client#install-with-homebrew)
+
+本アプリは Homebrew Cask からインストールします。Cask も `openai/tools/tunnel-client` を依存として導入します。
 
 ```bash
 brew tap walkingwifi28/local-mcp-tunnel https://github.com/walkingwifi28/local-mcp-tunnel.git
@@ -44,6 +53,17 @@ brew uninstall --cask local-mcp-tunnel
 4. 更新後のアプリを自動で再起動
 
 更新には、現在のアプリが保存されているフォルダへの書き込み権限が必要です。通常は`/Applications/Local MCP Tunnel.app`へインストールして使用してください。
+
+## tunnel-client の検出と更新
+
+設定画面で CLI のパスとバージョンを確認できます。`tunnel-client` と名前だけを指定した場合は、Homebrew の `opt/tunnel-client/bin` と `bin` を優先して検索します。保存済みの絶対パスや `$HOME`・`~` を使った指定は引き続き有効です。以前の手動導入から切り替える場合は、設定の実行ファイルを `tunnel-client` に戻してください。
+
+```bash
+brew update
+brew upgrade openai/tools/tunnel-client
+```
+
+更新前に GUI からトンネルを停止し、更新後に再確認・起動してください。アプリ内更新の対象は GUI 本体です。トンネルの初期化、起動・停止と再起動は引き続き GUI が管理します。
 
 ## 対応コマンド
 
